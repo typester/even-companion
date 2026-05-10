@@ -11,6 +11,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
 #[derive(uniffi::Record, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Location {
     pub latitude: f64,
     pub longitude: f64,

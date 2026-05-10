@@ -30,11 +30,12 @@ Returns the current GPS fix as JSON.
   "accuracyM": 5.0,
   "bearingDeg": 270.0,
   "speedMps": 1.2,
+  "speedAccuracyMps": 0.8,
   "timestampMs": 1746749400000
 }
 ```
 
-`altitude`, `accuracyM`, `bearingDeg`, and `speedMps` are omitted when not available.
+`altitude`, `accuracyM`, `bearingDeg`, `speedMps`, and `speedAccuracyMps` are omitted when not available. `speedAccuracyMps` requires Android 8.0 (API 26) or later.
 
 Returns `503 Service Unavailable` if no fix is available within 10 seconds.
 
@@ -45,6 +46,8 @@ The GPS subscription starts on the first request and stays active while requests
 WebSocket stream of location updates (~1 Hz). Each message is a JSON object in the same format as above.
 
 The GPS subscription starts when the first client connects and stops when the last client disconnects.
+
+> **Note:** The Even Hub WebView suspends WebSocket connections when the Even Hub app is backgrounded, making this endpoint effectively unusable in practice for G2 web apps. Use `GET /location` with 1-second polling instead.
 
 ## Setup
 
