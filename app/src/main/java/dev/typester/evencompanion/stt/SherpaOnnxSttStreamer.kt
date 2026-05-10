@@ -15,14 +15,17 @@ import dev.typester.evencompanion.core.uniffi.SttStreamer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
 class SherpaOnnxSttStreamer(private val context: Context) : SttStreamer {
 
-    private data class SessionEntry(
-        val stream: OnlineStream,
+    private class SessionEntry(
+        initialStream: OnlineStream,
         val executor: ExecutorService,
-        var lastPartial: String = "",
-    )
+    ) {
+        val streamRef = AtomicReference(initialStream)
+        var lastPartial: String = ""
+    }
 
     private val modelLock = Any()
     private var recognizer: OnlineRecognizer? = null
@@ -42,13 +45,13 @@ class SherpaOnnxSttStreamer(private val context: Context) : SttStreamer {
         val rec = getOrLoadRecognizer() ?: return
         val stream = rec.createStream("")
         val executor = Executors.newSingleThreadExecutor()
-        sessions[sessionId] = SessionEntry(stream, executor)
+        sessions[sessionId] = SessionEntry(initialStream = stream, executor = executor)
     }
 
     override fun endSession(sessionId: String) {
         sessions.remove(sessionId)?.let { entry ->
             entry.executor.shutdown()
-            entry.stream.release()
+            entry.streamRef.get().release()
         }
     }
 
@@ -56,18 +59,21 @@ class SherpaOnnxSttStreamer(private val context: Context) : SttStreamer {
         val entry = sessions[sessionId] ?: return
         val rec = recognizer ?: return
         entry.executor.execute {
+            val stream = entry.streamRef.get()
             val samples = pcmToFloats(pcm)
-            entry.stream.acceptWaveform(samples, 16000)
-            while (rec.isReady(entry.stream)) {
-                rec.decode(entry.stream)
+            stream.acceptWaveform(samples, 16000)
+            while (rec.isReady(stream)) {
+                rec.decode(stream)
             }
-            val text = rec.getResult(entry.stream).text.trim()
-            if (rec.isEndpoint(entry.stream)) {
+            val text = rec.getResult(stream).text.trim()
+            if (rec.isEndpoint(stream)) {
                 if (text.isNotEmpty()) {
                     EvenCore.instance.pushTranscript(sessionId, text, true)
                 }
-                rec.reset(entry.stream)
+                val newStream = rec.createStream("")
+                val oldStream = entry.streamRef.getAndSet(newStream)
                 entry.lastPartial = ""
+                oldStream.release()
             } else if (text.isNotEmpty() && text != entry.lastPartial) {
                 EvenCore.instance.pushTranscript(sessionId, text, false)
                 entry.lastPartial = text
@@ -100,12 +106,12 @@ class SherpaOnnxSttStreamer(private val context: Context) : SttStreamer {
                     numThreads = 2,
                 ),
                 endpointConfig = EndpointConfig(
-                    rule1 = EndpointRule(false, 2.4f, 0.0f),
-                    rule2 = EndpointRule(false, 1.2f, 0.0f),
+                    rule1 = EndpointRule(true, 2.4f, 0.0f),
+                    rule2 = EndpointRule(true, 1.2f, 0.0f),
                     rule3 = EndpointRule(false, 0.0f, 20.0f),
                 ),
                 enableEndpoint = true,
-                decodingMethod = "greedy_search",
+                decodingMethod = "modified_beam_search",
                 maxActivePaths = 4,
             )
             // null AssetManager = use filesystem paths directly

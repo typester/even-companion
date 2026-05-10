@@ -13,25 +13,28 @@ import java.util.concurrent.Executors
 
 class VoskSttStreamer(private val context: Context) : SttStreamer {
 
+    private data class ModelKey(val language: Language, val size: VoskModelSize)
+
     private data class SessionEntry(
         val recognizer: Recognizer,
         val executor: ExecutorService,
     )
 
     private val modelLock = Any()
-    private val models = ConcurrentHashMap<Language, Model>()
+    private val models = ConcurrentHashMap<ModelKey, Model>()
     private val sessions = ConcurrentHashMap<String, SessionEntry>()
 
     fun preload() {
+        val manager = VoskModelManager.get(context)
         for (language in Language.values()) {
-            if (VoskModelManager.get(context).isReady(language)) {
+            if (manager.isAnyReady(language)) {
                 getOrLoadModel(language)
             }
         }
     }
 
     override fun isLanguageReady(language: Language): Boolean =
-        VoskModelManager.get(context).isReady(language)
+        VoskModelManager.get(context).isAnyReady(language)
 
     override fun startSession(sessionId: String, language: Language) {
         val model = getOrLoadModel(language)
@@ -68,13 +71,18 @@ class VoskSttStreamer(private val context: Context) : SttStreamer {
     }
 
     private fun getOrLoadModel(language: Language): Model {
-        models[language]?.let { return it }
+        val manager = VoskModelManager.get(context)
+        val actualSize = manager.effectiveSize(language)
+            ?: throw IllegalStateException("model not ready: $language")
+        val key = ModelKey(language, actualSize)
+
+        models[key]?.let { return it }
         synchronized(modelLock) {
-            models[language]?.let { return it }
-            val path = VoskModelManager.get(context).modelPath(language)
-                ?: throw IllegalStateException("model not ready: $language")
+            models[key]?.let { return it }
+            val path = manager.modelPath(language, actualSize)
+                ?: throw IllegalStateException("model path missing: $language $actualSize")
             val model = Model(path)
-            models[language] = model
+            models[key] = model
             return model
         }
     }

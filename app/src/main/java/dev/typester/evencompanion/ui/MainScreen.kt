@@ -16,10 +16,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +35,7 @@ import dev.typester.evencompanion.service.CoreService
 import dev.typester.evencompanion.stt.ModelStatus
 import dev.typester.evencompanion.stt.SherpaModelManager
 import dev.typester.evencompanion.stt.VoskModelManager
+import dev.typester.evencompanion.stt.VoskModelSize
 
 @Composable
 fun MainScreen() {
@@ -62,8 +63,6 @@ fun MainScreen() {
     }
 
     val voskMgr = remember { VoskModelManager.get(ctx) }
-    val voskJaStatus by voskMgr.status(Language.JA)
-    val voskEnStatus by voskMgr.status(Language.EN)
 
     val sherpaMgr = remember { SherpaModelManager.get(ctx) }
     val sherpaEnStatus by sherpaMgr.status(Language.EN)
@@ -79,20 +78,9 @@ fun MainScreen() {
         ) {
             Text("VOSK", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
-            ModelStatusRow(
-                label = "Japanese",
-                status = voskJaStatus,
-                onDownload = { voskMgr.download(Language.JA) },
-                onCancel = { voskMgr.cancel(Language.JA) },
-                onDelete = { voskMgr.delete(Language.JA) },
-            )
-            ModelStatusRow(
-                label = "English",
-                status = voskEnStatus,
-                onDownload = { voskMgr.download(Language.EN) },
-                onCancel = { voskMgr.cancel(Language.EN) },
-                onDelete = { voskMgr.delete(Language.EN) },
-            )
+            VoskLanguageSection(label = "Japanese", language = Language.JA, manager = voskMgr)
+            Spacer(modifier = Modifier.height(8.dp))
+            VoskLanguageSection(label = "English", language = Language.EN, manager = voskMgr)
             Spacer(modifier = Modifier.height(16.dp))
             Text("Sherpa-ONNX (streaming)", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
@@ -134,6 +122,97 @@ fun MainScreen() {
 }
 
 @Composable
+private fun VoskLanguageSection(
+    label: String,
+    language: Language,
+    manager: VoskModelManager,
+) {
+    val variants = remember(language) { VoskModelManager.variantsFor(language) }
+    val selectedSize by manager.selectedSize(language)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        for (size in variants) {
+            val status by manager.status(language, size)
+            VoskVariantRow(
+                label = "${VoskModelManager.displayName(size)} (${VoskModelManager.sizeHint(language, size)})",
+                isSelected = selectedSize == size,
+                onSelect = { manager.setSelectedSize(language, size) },
+                status = status,
+                onDownload = { manager.download(language, size) },
+                onCancel = { manager.cancel(language, size) },
+                onDelete = { manager.delete(language, size) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoskVariantRow(
+    label: String,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    status: ModelStatus,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = isSelected, onClick = onSelect)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    when (status) {
+                        is ModelStatus.NotDownloaded -> "Not downloaded"
+                        is ModelStatus.Downloading -> "Downloading… ${status.percent}%"
+                        is ModelStatus.Extracting -> "Extracting…"
+                        is ModelStatus.Ready -> "Ready"
+                        is ModelStatus.Failed -> "Failed: ${status.reason}"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            Button(
+                onClick = {
+                    when (status) {
+                        is ModelStatus.NotDownloaded, is ModelStatus.Failed -> onDownload()
+                        is ModelStatus.Downloading, is ModelStatus.Extracting -> onCancel()
+                        is ModelStatus.Ready -> onDelete()
+                    }
+                },
+            ) {
+                Text(
+                    when (status) {
+                        is ModelStatus.NotDownloaded, is ModelStatus.Failed -> "Download"
+                        is ModelStatus.Downloading, is ModelStatus.Extracting -> "Cancel"
+                        is ModelStatus.Ready -> "Delete"
+                    }
+                )
+            }
+        }
+        when (status) {
+            is ModelStatus.Downloading -> LinearProgressIndicator(
+                progress = { status.percent / 100f },
+                modifier = Modifier.fillMaxWidth().padding(start = 40.dp, bottom = 4.dp),
+            )
+            is ModelStatus.Extracting -> LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().padding(start = 40.dp, bottom = 4.dp),
+            )
+            else -> {}
+        }
+    }
+}
+
+@Composable
 private fun ModelStatusRow(
     label: String,
     status: ModelStatus,
@@ -153,6 +232,7 @@ private fun ModelStatusRow(
                     when (status) {
                         is ModelStatus.NotDownloaded -> "Not downloaded"
                         is ModelStatus.Downloading -> "Downloading… ${status.percent}%"
+                        is ModelStatus.Extracting -> "Extracting…"
                         is ModelStatus.Ready -> "Ready"
                         is ModelStatus.Failed -> "Failed: ${status.reason}"
                     },
@@ -163,7 +243,7 @@ private fun ModelStatusRow(
                 onClick = {
                     when (status) {
                         is ModelStatus.NotDownloaded, is ModelStatus.Failed -> onDownload()
-                        is ModelStatus.Downloading -> onCancel()
+                        is ModelStatus.Downloading, is ModelStatus.Extracting -> onCancel()
                         is ModelStatus.Ready -> onDelete()
                     }
                 },
@@ -171,17 +251,21 @@ private fun ModelStatusRow(
                 Text(
                     when (status) {
                         is ModelStatus.NotDownloaded, is ModelStatus.Failed -> "Download"
-                        is ModelStatus.Downloading -> "Cancel"
+                        is ModelStatus.Downloading, is ModelStatus.Extracting -> "Cancel"
                         is ModelStatus.Ready -> "Delete"
                     }
                 )
             }
         }
-        if (status is ModelStatus.Downloading) {
-            LinearProgressIndicator(
+        when (status) {
+            is ModelStatus.Downloading -> LinearProgressIndicator(
                 progress = { status.percent / 100f },
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             )
+            is ModelStatus.Extracting -> LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            )
+            else -> {}
         }
     }
 }
