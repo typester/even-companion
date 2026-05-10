@@ -2,23 +2,28 @@
 
 Android companion app for [Even Realities G2](https://www.evenrealities.com/) smart glasses.
 
-Exposes device APIs over a localhost HTTP server so Even G2 web apps can `fetch()` them — working around the Even Realities App WebView's lack of location permission.
+Exposes device APIs over a localhost HTTP server so Even G2 web apps can `fetch()` them — working around the Even Realities App WebView's lack of location permission and built-in STT's cloud dependency.
 
 ## How it works
 
-The Even G2 runs web apps inside a WebView that cannot request location permission. Even Companion runs as a foreground service on the paired Android phone, subscribes to GPS, and serves the data on `http://127.0.0.1:44423`. Your G2 web app fetches from that address.
+The Even G2 runs web apps inside a WebView that cannot request location permission, and its built-in STT requires a cloud connection. Even Companion runs as a foreground service on the paired Android phone and serves both GPS and on-device speech-to-text on `http://127.0.0.1:44423`.
 
 ```
 G2 WebApp  ──fetch()──▶  Even Companion (Android)
                               │
-                    FusedLocationProviderClient
-                              │
-                           GPS hardware
+                    ┌─────────┴──────────┐
+                    │                    │
+           FusedLocationProvider      VOSK STT
+                    │                    │
+              GPS hardware          mic audio via
+                                   G2 bridge API
 ```
 
 ## API
 
-### `GET /location`
+### Location
+
+#### `GET /location`
 
 Returns the current GPS fix as JSON.
 
@@ -35,19 +40,77 @@ Returns the current GPS fix as JSON.
 }
 ```
 
-`altitude`, `accuracyM`, `bearingDeg`, `speedMps`, and `speedAccuracyMps` are omitted when not available. `speedAccuracyMps` requires Android 8.0 (API 26) or later.
+`altitude`, `accuracyM`, `bearingDeg`, `speedMps`, and `speedAccuracyMps` are omitted when not available.
 
 Returns `503 Service Unavailable` if no fix is available within 10 seconds.
 
-The GPS subscription starts on the first request and stays active while requests keep coming. It shuts down automatically after 60 seconds of inactivity.
-
-### `GET /location/ws`
+#### `GET /location/ws`
 
 WebSocket stream of location updates (~1 Hz). Each message is a JSON object in the same format as above.
 
-The GPS subscription starts when the first client connects and stops when the last client disconnects.
+> **Note:** The Even Hub WebView suspends WebSocket connections when backgrounded, making this endpoint effectively unusable in practice. Use `GET /location` with 1-second polling instead.
 
-> **Note:** The Even Hub WebView suspends WebSocket connections when the Even Hub app is backgrounded, making this endpoint effectively unusable in practice for G2 web apps. Use `GET /location` with 1-second polling instead.
+### Speech-to-Text
+
+Fully on-device STT via [VOSK](https://alphacephei.com/vosk/). Audio is supplied by the G2 glasses mic through the Even Hub bridge API (`bridge.audioControl(true)` / `onEvenHubEvent` → `audioEvent.audioPcm`). Format: 16 kHz, 16-bit little-endian mono (10 ms / 40 bytes per frame from the bridge).
+
+Before using STT, download at least one language model from the companion app's main screen.
+
+#### `POST /stt/sessions`
+
+Create a new STT session.
+
+Request body:
+```json
+{ "language": "ja" }
+```
+
+`language` is `"ja"` (Japanese) or `"en"` (English).
+
+Response `200`:
+```json
+{
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "language": "ja",
+  "sampleRate": 16000,
+  "encoding": "pcm_s16le_mono"
+}
+```
+
+Response `503` if the model for the requested language has not been downloaded:
+```json
+{ "error": "model_not_ready", "language": "ja" }
+```
+
+#### `POST /stt/sessions/{id}/audio`
+
+Push raw PCM audio. Body is raw 16-bit little-endian mono PCM at 16 kHz. Any chunk size is accepted; batching ~100–250 ms (1600–4000 bytes) per POST is recommended to reduce HTTP overhead.
+
+Returns `204 No Content` on success, `404` if session unknown, `410` if session ended.
+
+#### `GET /stt/sessions/{id}/text?since=N&waitMs=25000`
+
+Long-poll for transcripts. Returns when new transcripts with `seq > since` are available, or after `waitMs` (max 30 000 ms). On timeout, returns an empty transcript list — re-poll immediately.
+
+Response `200`:
+```json
+{
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "transcripts": [
+    { "seq": 1, "text": "おはよう", "isFinal": false },
+    { "seq": 2, "text": "おはようございます", "isFinal": true }
+  ],
+  "nextSince": 2
+}
+```
+
+`isFinal: false` = partial result (may change); `isFinal: true` = committed utterance.
+
+#### `DELETE /stt/sessions/{id}`
+
+End a session and free its resources. Returns `204`.
+
+Sessions auto-expire after 60 seconds of inactivity (no audio POST and no active long-poll).
 
 ## Setup
 
@@ -75,8 +138,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 1. Open the app on your Android phone
 2. Grant location permission when prompted
-3. Tap **Start** — the foreground notification confirms the server is running
-4. Query `http://127.0.0.1:44423/location` from your G2 web app
+3. Download STT models — tap **Download** next to each language you need (~49 MB Japanese, ~41 MB English)
+4. Tap **Start** — the foreground notification confirms the server is running
+5. Query `http://127.0.0.1:44423/location` or the `/stt/*` endpoints from your G2 web app
 
 The server binds to `127.0.0.1` only in release builds. Debug builds bind to `0.0.0.0` for easier testing from a computer on the same network.
 
@@ -88,11 +152,15 @@ The server binds to `127.0.0.1` only in release builds. Debug builds bind to `0.
 | Core | Rust, bridged via [UniFFI](https://github.com/mozilla/uniffi-rs) |
 | HTTP server | tokio + axum |
 | GPS | FusedLocationProviderClient (Google Play Services) |
+| STT | [VOSK](https://alphacephei.com/vosk/) (on-device, streaming) |
 
-The Rust core owns the HTTP server lifecycle. Kotlin implements two UniFFI foreign traits:
+The Rust core owns the HTTP server lifecycle. Kotlin implements UniFFI foreign traits for GPS and STT:
 
-- `LocationProvider` — called on-demand by `GET /location`; maintains a persistent GPS subscription that idles out after 60 s of no requests
+- `LocationProvider` — called on-demand by `GET /location`
 - `LocationStreamer` — started/stopped by `WS /location/ws` as clients connect and disconnect
+- `SttStreamer` — wraps VOSK; one `Recognizer` per session, models shared across sessions of the same language
+
+VOSK models are downloaded on demand by `VoskModelManager` (no asset bundling — keeps the APK small). Models are stored in `filesDir/vosk/` and persist across app restarts.
 
 The server runs inside a foreground service (`type=location`) so it stays alive when the app is backgrounded or the screen is locked.
 
@@ -105,6 +173,7 @@ even-companion/
 │       ├── core/           EvenCore singleton
 │       ├── location/       PollingLocationProvider, FusedLocationStreamer
 │       ├── service/        CoreService (foreground service)
+│       ├── stt/            VoskSttStreamer, VoskModelManager
 │       └── ui/             Jetpack Compose screens
 └── rust/
     ├── core/               cdylib → libevencore.so  (UniFFI + HTTP server)

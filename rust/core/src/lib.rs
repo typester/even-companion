@@ -28,16 +28,10 @@ pub struct Location {
     pub timestamp_ms: i64,
 }
 
-struct RunningServer {
-    runtime: Runtime,
-    shutdown: oneshot::Sender<()>,
-    port: u16,
-}
-
-#[derive(uniffi::Object)]
-pub struct Core {
-    running: Mutex<Option<RunningServer>>,
-    state: Arc<state::SharedState>,
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum Language {
+    Ja,
+    En,
 }
 
 #[uniffi::export(with_foreign)]
@@ -49,6 +43,26 @@ pub trait LocationProvider: Send + Sync {
 pub trait LocationStreamer: Send + Sync {
     fn start(&self);
     fn stop(&self);
+}
+
+#[uniffi::export(with_foreign)]
+pub trait SttStreamer: Send + Sync {
+    fn is_language_ready(&self, language: Language) -> bool;
+    fn start_session(&self, session_id: String, language: Language);
+    fn end_session(&self, session_id: String);
+    fn feed_audio(&self, session_id: String, pcm: Vec<u8>);
+}
+
+struct RunningServer {
+    runtime: Runtime,
+    shutdown: oneshot::Sender<()>,
+    port: u16,
+}
+
+#[derive(uniffi::Object)]
+pub struct Core {
+    running: Mutex<Option<RunningServer>>,
+    state: Arc<state::SharedState>,
 }
 
 #[uniffi::export]
@@ -82,12 +96,13 @@ impl Core {
                     CoreError::Bind(e.to_string())
                 }
             })?;
-            let app = server::router(state);
+            let app = server::router(state.clone());
             tokio::spawn(async move {
                 let _ = axum::serve(listener, app)
                     .with_graceful_shutdown(async { let _ = rx.await; })
                     .await;
             });
+            server::spawn_stt_cleanup(state);
             Ok::<(), CoreError>(())
         })?;
 
@@ -120,5 +135,18 @@ impl Core {
 
     pub fn broadcast_location(&self, loc: Location) {
         self.state.location_tx.send(loc).ok();
+    }
+
+    pub fn set_stt_streamer(&self, streamer: Arc<dyn SttStreamer>) {
+        *self.state.stt_streamer.write() = Some(streamer);
+    }
+
+    pub fn push_transcript(&self, session_id: String, text: String, is_final: bool) {
+        let session = self.state.stt_sessions.read().get(&session_id).cloned();
+        if let Some(session) = session {
+            let seq = session.next_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            session.transcripts.lock().push(state::TranscriptEntry { seq, text, is_final });
+            session.notify.notify_waiters();
+        }
     }
 }

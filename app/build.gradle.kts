@@ -61,6 +61,7 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
     implementation(libs.play.services.location)
+    implementation("com.alphacephei:vosk-android:0.3.47")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

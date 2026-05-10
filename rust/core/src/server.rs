@@ -1,34 +1,80 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, Query, State,
     },
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get, post},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     sync::{atomic::Ordering, Arc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::broadcast;
 
-use crate::state::SharedState;
+use crate::state::{SharedState, SttSession};
+use crate::Language;
 
 pub fn router(state: Arc<SharedState>) -> Router {
     Router::new()
         .route("/location", get(get_location))
         .route("/location/ws", get(ws_handler))
+        .route("/stt/sessions", post(create_session))
+        .route("/stt/sessions/{id}/audio", post(post_audio))
+        .route("/stt/sessions/{id}/text", get(get_text))
+        .route("/stt/sessions/{id}", delete(delete_session))
         .with_state(state)
 }
 
+pub fn spawn_stt_cleanup(state: Arc<SharedState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let now = Instant::now();
+            let expired: Vec<Arc<SttSession>> = {
+                let sessions = state.stt_sessions.read();
+                sessions
+                    .values()
+                    .filter(|s| {
+                        !s.ended.load(Ordering::SeqCst)
+                            && now.duration_since(*s.last_active.lock()) > Duration::from_secs(60)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            for session in expired {
+                remove_session(&state, &session.id);
+            }
+        }
+    });
+}
+
+fn remove_session(state: &SharedState, id: &str) {
+    let removed = state.stt_sessions.write().remove(id);
+    if let Some(session) = removed {
+        session.ended.store(true, Ordering::SeqCst);
+        session.notify.notify_waiters();
+        if let Some(streamer) = state.stt_streamer.read().clone() {
+            let id = id.to_owned();
+            tokio::task::spawn_blocking(move || streamer.end_session(id));
+        }
+    }
+}
+
+fn cors() -> [(header::HeaderName, HeaderValue); 1] {
+    [(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    )]
+}
+
 async fn get_location(State(s): State<Arc<SharedState>>) -> Response {
-    // Wildcard is safe: server binds to loopback only in release builds.
-    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))];
     let provider = s.location_provider.read().clone();
     let Some(provider) = provider else {
-        return (cors, StatusCode::SERVICE_UNAVAILABLE).into_response();
+        return (cors(), StatusCode::SERVICE_UNAVAILABLE).into_response();
     };
     let result = tokio::time::timeout(
         Duration::from_secs(10),
@@ -36,8 +82,8 @@ async fn get_location(State(s): State<Arc<SharedState>>) -> Response {
     )
     .await;
     match result {
-        Ok(Ok(Some(loc))) => (cors, Json(loc)).into_response(),
-        _ => (cors, StatusCode::SERVICE_UNAVAILABLE).into_response(),
+        Ok(Ok(Some(loc))) => (cors(), Json(loc)).into_response(),
+        _ => (cors(), StatusCode::SERVICE_UNAVAILABLE).into_response(),
     }
 }
 
@@ -78,4 +124,202 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<SharedState>) {
             streamer.stop();
         }
     }
+}
+
+// ── STT handlers ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateSessionBody {
+    language: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSessionResponse {
+    session_id: String,
+    language: String,
+    sample_rate: u32,
+    encoding: &'static str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextQuery {
+    since: Option<u64>,
+    wait_ms: Option<u64>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptItem {
+    seq: u64,
+    text: String,
+    is_final: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextResponse {
+    session_id: String,
+    transcripts: Vec<TranscriptItem>,
+    next_since: u64,
+}
+
+async fn create_session(
+    State(s): State<Arc<SharedState>>,
+    Json(body): Json<CreateSessionBody>,
+) -> Response {
+    let (language, lang_str) = match body.language.as_str() {
+        "ja" => (Language::Ja, "ja"),
+        "en" => (Language::En, "en"),
+        _ => return (cors(), StatusCode::BAD_REQUEST).into_response(),
+    };
+
+    // Clone out of the lock before spawn_blocking — RwLockReadGuard is !Send.
+    let streamer = s.stt_streamer.read().clone();
+    let ready = if let Some(ref st) = streamer {
+        let st = st.clone();
+        tokio::task::spawn_blocking(move || st.is_language_ready(language))
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if !ready {
+        return (
+            cors(),
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready", "language": lang_str}))),
+        )
+            .into_response();
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let session = Arc::new(SttSession {
+        id: id.clone(),
+        transcripts: parking_lot::Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+        last_active: parking_lot::Mutex::new(Instant::now()),
+        next_seq: std::sync::atomic::AtomicU64::new(0),
+        ended: std::sync::atomic::AtomicBool::new(false),
+    });
+    s.stt_sessions.write().insert(id.clone(), session);
+
+    if let Some(streamer) = streamer {
+        let sid = id.clone();
+        let _ = tokio::task::spawn_blocking(move || streamer.start_session(sid, language)).await;
+    }
+
+    (
+        cors(),
+        Json(CreateSessionResponse {
+            session_id: id,
+            language: lang_str.to_owned(),
+            sample_rate: 16000,
+            encoding: "pcm_s16le_mono",
+        }),
+    )
+        .into_response()
+}
+
+async fn post_audio(
+    Path(id): Path<String>,
+    State(s): State<Arc<SharedState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let session = s.stt_sessions.read().get(&id).cloned();
+    let Some(session) = session else {
+        return (cors(), StatusCode::NOT_FOUND).into_response();
+    };
+    if session.ended.load(Ordering::SeqCst) {
+        return (cors(), StatusCode::GONE).into_response();
+    }
+
+    *session.last_active.lock() = Instant::now();
+
+    if let Some(streamer) = s.stt_streamer.read().clone() {
+        let pcm = body.to_vec();
+        let sid = id.clone();
+        tokio::task::spawn_blocking(move || streamer.feed_audio(sid, pcm));
+    }
+
+    (cors(), StatusCode::NO_CONTENT).into_response()
+}
+
+async fn get_text(
+    Path(id): Path<String>,
+    Query(params): Query<TextQuery>,
+    State(s): State<Arc<SharedState>>,
+) -> Response {
+    let session = s.stt_sessions.read().get(&id).cloned();
+    let Some(session) = session else {
+        return (cors(), StatusCode::NOT_FOUND).into_response();
+    };
+    if session.ended.load(Ordering::SeqCst) {
+        return (cors(), StatusCode::GONE).into_response();
+    }
+
+    *session.last_active.lock() = Instant::now();
+
+    let since = params.since.unwrap_or(0);
+    let wait_ms = params.wait_ms.unwrap_or(25000).min(30000);
+
+    // Register for notification before snapshotting to avoid the TOCTOU race
+    // where push_transcript fires between our empty-check and select!.
+    let notification = session.notify.notified();
+    tokio::pin!(notification);
+    notification.as_mut().enable();
+
+    let snapshot = transcripts_since(&session, since);
+    if !snapshot.is_empty() {
+        let next_since = snapshot.last().map(|t| t.seq).unwrap_or(since);
+        return (
+            cors(),
+            Json(TextResponse {
+                session_id: id,
+                transcripts: snapshot,
+                next_since,
+            }),
+        )
+            .into_response();
+    }
+
+    tokio::select! {
+        _ = &mut notification => {}
+        _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {}
+    }
+
+    if session.ended.load(Ordering::SeqCst) {
+        return (cors(), StatusCode::GONE).into_response();
+    }
+
+    let snapshot = transcripts_since(&session, since);
+    let next_since = snapshot.last().map(|t| t.seq).unwrap_or(since);
+    (
+        cors(),
+        Json(TextResponse {
+            session_id: id,
+            transcripts: snapshot,
+            next_since,
+        }),
+    )
+        .into_response()
+}
+
+async fn delete_session(Path(id): Path<String>, State(s): State<Arc<SharedState>>) -> Response {
+    remove_session(&s, &id);
+    (cors(), StatusCode::NO_CONTENT).into_response()
+}
+
+fn transcripts_since(session: &SttSession, since: u64) -> Vec<TranscriptItem> {
+    session
+        .transcripts
+        .lock()
+        .iter()
+        .filter(|t| t.seq > since)
+        .map(|t| TranscriptItem {
+            seq: t.seq,
+            text: t.text.clone(),
+            is_final: t.is_final,
+        })
+        .collect()
 }
