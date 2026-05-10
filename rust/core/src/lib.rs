@@ -22,6 +22,8 @@ pub struct Location {
     pub bearing_deg: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_mps: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_accuracy_mps: Option<f32>,
     pub timestamp_ms: i64,
 }
 

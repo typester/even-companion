@@ -1,5 +1,6 @@
 package dev.typester.evencompanion.location
 
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -99,5 +100,7 @@ internal fun android.location.Location.toCoreLocation() = Location(
     accuracyM = if (hasAccuracy()) accuracy else null,
     bearingDeg = if (hasBearing()) bearing else null,
     speedMps = if (hasSpeed()) speed else null,
+    speedAccuracyMps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hasSpeedAccuracy())
+        speedAccuracyMetersPerSecond else null,
     timestampMs = time,
 )
