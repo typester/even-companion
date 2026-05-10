@@ -12,7 +12,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.typester.evencompanion"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
@@ -36,8 +36,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = "11"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+        }
     }
 
     buildFeatures {
@@ -69,6 +71,8 @@ dependencies {
     // and place in app/libs/sherpa-onnx-1.13.1.aar
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
     implementation("org.apache.commons:commons-compress:1.26.1")
+    // On-device LLM inference via LiteRT-LM (Google AI Edge) — supports .litertlm format
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.11.0")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -15,8 +15,9 @@ use std::{
 };
 use tokio::sync::broadcast;
 
+use crate::error::LlmError;
 use crate::state::{SharedState, SttSession};
-use crate::Language;
+use crate::{Language, LlmEngine};
 
 pub fn router(state: Arc<SharedState>) -> Router {
     Router::new()
@@ -26,6 +27,8 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/stt/sessions/{id}/audio", post(post_audio).options(preflight))
         .route("/stt/sessions/{id}/text", get(get_text))
         .route("/stt/sessions/{id}", delete(delete_session).options(preflight))
+        .route("/llm/translate", post(llm_translate).options(preflight))
+        .route("/llm/summarize", post(llm_summarize).options(preflight))
         .with_state(state)
 }
 
@@ -338,4 +341,112 @@ fn transcripts_since(session: &SttSession, since: u64) -> Vec<TranscriptItem> {
             is_final: t.is_final,
         })
         .collect()
+}
+
+// ── LLM handlers ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TranslateBody {
+    text: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+struct SummarizeBody {
+    text: String,
+    language: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LlmTextResponse {
+    text: String,
+}
+
+fn lang_name(code: &str) -> Option<&'static str> {
+    match code {
+        "ja" => Some("Japanese"),
+        "en" => Some("English"),
+        _ => None,
+    }
+}
+
+fn map_llm_error(e: LlmError) -> Response {
+    match e {
+        LlmError::NotReady => (
+            cors(),
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready"}))),
+        )
+            .into_response(),
+        LlmError::Inference(reason) => (
+            cors(),
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "inference_failed", "reason": reason}))),
+        )
+            .into_response(),
+    }
+}
+
+async fn run_llm(engine: Arc<dyn LlmEngine>, prompt: String) -> Response {
+    match tokio::task::spawn_blocking(move || engine.prompt(prompt)).await {
+        Ok(Ok(text)) => (cors(), Json(LlmTextResponse { text })).into_response(),
+        Ok(Err(e)) => map_llm_error(e),
+        Err(_) => (
+            cors(),
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal_error"}))),
+        )
+            .into_response(),
+    }
+}
+
+async fn resolve_llm_engine(s: &SharedState) -> Option<Arc<dyn LlmEngine>> {
+    let engine = s.llm_engine.read().clone()?;
+    let e = engine.clone();
+    let ready = tokio::task::spawn_blocking(move || e.is_ready()).await.unwrap_or(false);
+    if ready { Some(engine) } else { None }
+}
+
+async fn llm_translate(
+    State(s): State<Arc<SharedState>>,
+    Json(body): Json<TranslateBody>,
+) -> Response {
+    if body.text.is_empty() {
+        return (cors(), (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "bad_request", "reason": "text is empty"})))).into_response();
+    }
+    let (Some(from), Some(to)) = (lang_name(&body.from), lang_name(&body.to)) else {
+        return (cors(), (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "bad_request", "reason": "unsupported language code"})))).into_response();
+    };
+
+    let Some(engine) = resolve_llm_engine(&s).await else {
+        return (cors(), (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready"})))).into_response();
+    };
+
+    let prompt = format!(
+        "Translate the following text from {from} to {to}. Output only the translated text with no explanation.\n\nText: {}\n\nTranslation:",
+        body.text
+    );
+    run_llm(engine, prompt).await
+}
+
+async fn llm_summarize(
+    State(s): State<Arc<SharedState>>,
+    Json(body): Json<SummarizeBody>,
+) -> Response {
+    if body.text.is_empty() {
+        return (cors(), (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "bad_request", "reason": "text is empty"})))).into_response();
+    }
+
+    let Some(engine) = resolve_llm_engine(&s).await else {
+        return (cors(), (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready"})))).into_response();
+    };
+
+    let lang_suffix = body.language
+        .as_deref()
+        .and_then(lang_name)
+        .map(|l| format!(" Respond in {l}."))
+        .unwrap_or_default();
+    let prompt = format!(
+        "Summarize the following text concisely.{lang_suffix}\nOutput only the summary with no preamble.\n\nText: {}\n\nSummary:",
+        body.text
+    );
+    run_llm(engine, prompt).await
 }

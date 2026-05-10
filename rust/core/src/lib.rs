@@ -4,7 +4,7 @@ mod error;
 mod server;
 mod state;
 
-pub use error::CoreError;
+pub use error::{CoreError, LlmError};
 
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
@@ -51,6 +51,12 @@ pub trait SttStreamer: Send + Sync {
     fn start_session(&self, session_id: String, language: Language);
     fn end_session(&self, session_id: String);
     fn feed_audio(&self, session_id: String, pcm: Vec<u8>);
+}
+
+#[uniffi::export(with_foreign)]
+pub trait LlmEngine: Send + Sync {
+    fn is_ready(&self) -> bool;
+    fn prompt(&self, prompt: String) -> Result<String, LlmError>;
 }
 
 struct RunningServer {
@@ -139,6 +145,10 @@ impl Core {
 
     pub fn register_stt_streamer(&self, engine: String, streamer: Arc<dyn SttStreamer>) {
         self.state.stt_streamers.write().insert(engine, streamer);
+    }
+
+    pub fn register_llm_engine(&self, engine: Arc<dyn LlmEngine>) {
+        *self.state.llm_engine.write() = Some(engine);
     }
 
     pub fn push_transcript(&self, session_id: String, text: String, is_final: bool) {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
-use crate::{Location, LocationProvider, LocationStreamer, SttStreamer};
+use crate::{Location, LocationProvider, LocationStreamer, LlmEngine, SttStreamer};
 
 #[derive(Clone)]
 pub struct TranscriptEntry {
@@ -31,6 +31,8 @@ pub struct SharedState {
 
     pub stt_streamers: RwLock<HashMap<String, Arc<dyn SttStreamer>>>,
     pub stt_sessions: RwLock<HashMap<String, Arc<SttSession>>>,
+
+    pub llm_engine: RwLock<Option<Arc<dyn LlmEngine>>>,
 }
 
 impl SharedState {
@@ -43,6 +45,7 @@ impl SharedState {
             subscriber_count: AtomicUsize::new(0),
             stt_streamers: RwLock::new(HashMap::new()),
             stt_sessions: RwLock::new(HashMap::new()),
+            llm_engine: RwLock::new(None),
         }
     }
 }

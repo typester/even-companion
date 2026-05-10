@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import dev.typester.evencompanion.llm.GemmaModelManager
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -62,6 +63,9 @@ fun MainScreen() {
         }
     }
 
+    val gemmaMgr = remember { GemmaModelManager.get(ctx) }
+    val gemmaStatus by gemmaMgr.status()
+
     val voskMgr = remember { VoskModelManager.get(ctx) }
 
     val sherpaMgr = remember { SherpaModelManager.get(ctx) }
@@ -76,6 +80,16 @@ fun MainScreen() {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Text("Gemma (on-device LLM)", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(4.dp))
+            ModelStatusRow(
+                label = "Gemma 4 E2B (~2.6 GB)",
+                status = gemmaStatus,
+                onDownload = { gemmaMgr.download() },
+                onCancel = { gemmaMgr.cancel() },
+                onDelete = { gemmaMgr.delete() },
+            )
+            Spacer(modifier = Modifier.height(16.dp))
             Text("VOSK", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             VoskLanguageSection(label = "Japanese", language = Language.JA, manager = voskMgr)

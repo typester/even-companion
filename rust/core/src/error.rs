@@ -1,4 +1,12 @@
 #[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum LlmError {
+    #[error("model is not ready")]
+    NotReady,
+    #[error("inference failed: {0}")]
+    Inference(String),
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
     #[error("server is already running on port {0}")]
     AlreadyRunning(u16),

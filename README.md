@@ -2,26 +2,28 @@
 
 Android companion app for [Even Realities G2](https://www.evenrealities.com/) smart glasses.
 
-Exposes device APIs over a localhost HTTP server so Even G2 web apps can `fetch()` them — working around the Even Realities App WebView's lack of location permission and built-in STT's cloud dependency.
+Exposes device APIs over a localhost HTTP server so Even G2 web apps can `fetch()` them — working around the Even Realities App WebView's lack of location permission, built-in STT's cloud dependency, and the absence of on-device translation/summarization.
 
 ## How it works
 
-The Even G2 runs web apps inside a WebView that cannot request location permission, and its built-in STT requires a cloud connection. Even Companion runs as a foreground service on the paired Android phone and serves both GPS and on-device speech-to-text on `http://127.0.0.1:44423`.
+The Even G2 runs web apps inside a WebView that cannot request location permission, and its built-in STT requires a cloud connection. Even Companion runs as a foreground service on the paired Android phone and serves GPS, on-device speech-to-text, and on-device LLM (translation / summarization) on `http://127.0.0.1:44423`.
 
 ```
 G2 WebApp  ──fetch()──▶  Even Companion (Android)
                               │
-                    ┌─────────┴──────────┐
-                    │                    │
-           FusedLocationProvider      STT engines
-                    │               ┌───┴────────────────┐
-              GPS hardware          │                    │
-                                 VOSK               Sherpa-ONNX
-                             (JA + EN)           streaming Zipformer
-                                                     (EN only)
+            ┌─────────────────┼──────────────────┐
+            │                 │                  │
+   FusedLocationProvider   STT engines     Gemma 4 E2B LLM
+            │            ┌───┴──────────┐  (via LiteRT-LM)
+      GPS hardware        │             │
+                       VOSK        Sherpa-ONNX    translate
+                   (JA + EN)     streaming ZIP    summarize
+                                   (EN only)
 ```
 
 ## API
+
+All endpoints accept and return JSON (`Content-Type: application/json`). CORS headers are included on every response.
 
 ### Location
 
@@ -126,6 +128,57 @@ End a session and free its resources. Returns `204`.
 
 Sessions auto-expire after 60 seconds of inactivity (no audio POST and no active long-poll).
 
+### LLM (translation / summarization)
+
+On-device inference via [Gemma 4 E2B](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) running through [LiteRT-LM SDK](https://github.com/google-ai-edge/LiteRT-LM). The model (~2.6 GB) is downloaded in-app and stored in app-private storage — no AICore or system dependency.
+
+**Requirements:** 3 GB+ RAM recommended. GPU backend (Adreno 7xx / Mali-G715+) gives best performance (~500 ms–2 s per request); falls back to CPU on unsupported hardware. The companion app's main screen shows the model status and a **Download** button.
+
+Both endpoints return `503` with `{"error": "model_not_ready"}` until the Gemma model is downloaded.
+
+#### `POST /llm/translate`
+
+Translate text between Japanese and English.
+
+Request body:
+```json
+{ "text": "おはようございます", "from": "ja", "to": "en" }
+```
+
+`from` and `to` are `"ja"` or `"en"`.
+
+Response `200`:
+```json
+{ "text": "Good morning." }
+```
+
+| Status | Body |
+|--------|------|
+| `200` | `{ "text": "…" }` |
+| `400` | `{ "error": "bad_request", "reason": "…" }` — empty text or unsupported language code |
+| `503` | `{ "error": "model_not_ready" }` — model not available yet |
+| `500` | `{ "error": "inference_failed", "reason": "…" }` |
+
+#### `POST /llm/summarize`
+
+Summarize text. The optional `language` field hints at the desired output language; if omitted the model decides.
+
+Request body:
+```json
+{ "text": "…長い文章…", "language": "ja" }
+```
+
+`language` is `"ja"` or `"en"` (optional).
+
+Response `200`:
+```json
+{ "text": "要約された内容" }
+```
+
+Same error responses as `/llm/translate`.
+
+> **Limits:** Very long input texts may be truncated at ~4 000 tokens (~3 000 words). Output length is determined by the model's default generation settings.
+
 ## Setup
 
 ### Requirements
@@ -164,8 +217,9 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 1. Open the app on your Android phone
 2. Grant location permission when prompted
 3. Download STT models — tap **Download** in the VOSK or Sherpa-ONNX section for each language you need
-4. Tap **Start** — the foreground notification confirms the server is running
-5. Query `http://127.0.0.1:44423/location` or the `/stt/*` endpoints from your G2 web app
+4. Download the Gemma model — tap **Download** in the Gemma section (~2.6 GB, stored in app-private storage)
+5. Tap **Start** — the foreground notification confirms the server is running
+6. Query `http://127.0.0.1:44423/location`, `/stt/*`, or `/llm/*` endpoints from your G2 web app
 
 The server binds to `127.0.0.1` only in release builds. Debug builds bind to `0.0.0.0` for easier testing from a computer on the same network.
 
@@ -178,14 +232,16 @@ The server binds to `127.0.0.1` only in release builds. Debug builds bind to `0.
 | HTTP server | tokio + axum |
 | GPS | FusedLocationProviderClient (Google Play Services) |
 | STT | [VOSK](https://alphacephei.com/vosk/) + [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) (on-device, streaming) |
+| LLM | [Gemma 4 E2B](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) via [LiteRT-LM SDK](https://github.com/google-ai-edge/LiteRT-LM) (on-device, in-process) |
 
-The Rust core owns the HTTP server lifecycle. Kotlin implements UniFFI foreign traits for GPS and STT:
+The Rust core owns the HTTP server lifecycle. Kotlin implements UniFFI foreign traits for GPS, STT, and LLM:
 
 - `LocationProvider` — called on-demand by `GET /location`
 - `LocationStreamer` — started/stopped by `WS /location/ws` as clients connect and disconnect
 - `SttStreamer` — interface implemented by both `VoskSttStreamer` and `SherpaOnnxSttStreamer`; the engine is chosen at session creation time and stored on the session
+- `LlmEngine` — interface implemented by `GemmaLlmEngine`; prompts are constructed in Rust, Kotlin calls LiteRT-LM for inference
 
-Models are downloaded on demand (no asset bundling). VOSK models go to `filesDir/vosk/`, Sherpa-ONNX models to `filesDir/sherpa/`.
+STT models are downloaded on demand (no asset bundling). VOSK models go to `filesDir/vosk/`, Sherpa-ONNX models to `filesDir/sherpa/`. The Gemma 4 E2B model is stored in `filesDir/gemma/` (app-private, no AICore dependency).
 
 The server runs inside a foreground service (`type=location`) so it stays alive when the app is backgrounded or the screen is locked.
 
@@ -196,6 +252,7 @@ even-companion/
 ├── app/                    Android app module
 │   └── src/main/java/dev/typester/evencompanion/
 │       ├── core/           EvenCore singleton
+│       ├── llm/            GemmaLlmEngine (LiteRT-LM)
 │       ├── location/       PollingLocationProvider, FusedLocationStreamer
 │       ├── service/        CoreService (foreground service)
 │       ├── stt/            VoskSttStreamer, VoskModelManager, SherpaOnnxSttStreamer, SherpaModelManager

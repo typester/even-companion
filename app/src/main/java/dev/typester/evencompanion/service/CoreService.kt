@@ -17,6 +17,7 @@ import dev.typester.evencompanion.core.EvenCore
 import dev.typester.evencompanion.core.uniffi.CoreException
 import dev.typester.evencompanion.location.FusedLocationStreamer
 import dev.typester.evencompanion.location.PollingLocationProvider
+import dev.typester.evencompanion.llm.GemmaLlmEngine
 import dev.typester.evencompanion.stt.SherpaOnnxSttStreamer
 import dev.typester.evencompanion.stt.VoskSttStreamer
 
@@ -26,6 +27,7 @@ class CoreService : Service() {
     private var pollingProvider: PollingLocationProvider? = null
     private var voskStreamer: VoskSttStreamer? = null
     private var sherpaStreamer: SherpaOnnxSttStreamer? = null
+    private var llmEngine: GemmaLlmEngine? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -52,6 +54,10 @@ class CoreService : Service() {
         EvenCore.instance.registerSttStreamer("vosk", vosk)
         EvenCore.instance.registerSttStreamer("sherpa", sherpa)
         Thread { vosk.preload(); sherpa.preload() }.start()
+
+        val gemma = GemmaLlmEngine(applicationContext)
+        llmEngine = gemma
+        EvenCore.instance.registerLlmEngine(gemma)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -62,6 +68,7 @@ class CoreService : Service() {
         pollingProvider?.cleanup()
         voskStreamer?.cleanup()
         sherpaStreamer?.cleanup()
+        llmEngine?.cleanup()
         try { EvenCore.instance.stopServer() } catch (_: CoreException) {}
         super.onDestroy()
     }
