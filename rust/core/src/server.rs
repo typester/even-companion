@@ -22,10 +22,10 @@ pub fn router(state: Arc<SharedState>) -> Router {
     Router::new()
         .route("/location", get(get_location))
         .route("/location/ws", get(ws_handler))
-        .route("/stt/sessions", post(create_session))
-        .route("/stt/sessions/{id}/audio", post(post_audio))
+        .route("/stt/sessions", post(create_session).options(preflight))
+        .route("/stt/sessions/{id}/audio", post(post_audio).options(preflight))
         .route("/stt/sessions/{id}/text", get(get_text))
-        .route("/stt/sessions/{id}", delete(delete_session))
+        .route("/stt/sessions/{id}", delete(delete_session).options(preflight))
         .with_state(state)
 }
 
@@ -57,18 +57,24 @@ fn remove_session(state: &SharedState, id: &str) {
     if let Some(session) = removed {
         session.ended.store(true, Ordering::SeqCst);
         session.notify.notify_waiters();
-        if let Some(streamer) = state.stt_streamer.read().clone() {
+        if let Some(streamer) = state.stt_streamers.read().get(&session.engine).cloned() {
             let id = id.to_owned();
             tokio::task::spawn_blocking(move || streamer.end_session(id));
         }
     }
 }
 
-fn cors() -> [(header::HeaderName, HeaderValue); 1] {
-    [(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    )]
+fn cors() -> [(header::HeaderName, HeaderValue); 4] {
+    [
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*")),
+        (header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, DELETE, OPTIONS")),
+        (header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type")),
+        (header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400")),
+    ]
+}
+
+async fn preflight() -> Response {
+    (cors(), StatusCode::NO_CONTENT).into_response()
 }
 
 async fn get_location(State(s): State<Arc<SharedState>>) -> Response {
@@ -131,6 +137,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<SharedState>) {
 #[derive(Deserialize)]
 struct CreateSessionBody {
     language: String,
+    engine: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +145,7 @@ struct CreateSessionBody {
 struct CreateSessionResponse {
     session_id: String,
     language: String,
+    engine: String,
     sample_rate: u32,
     encoding: &'static str,
 }
@@ -175,20 +183,28 @@ async fn create_session(
         _ => return (cors(), StatusCode::BAD_REQUEST).into_response(),
     };
 
+    let engine = body.engine.unwrap_or_else(|| "vosk".to_owned());
+
     // Clone out of the lock before spawn_blocking — RwLockReadGuard is !Send.
-    let streamer = s.stt_streamer.read().clone();
-    let ready = if let Some(ref st) = streamer {
-        let st = st.clone();
+    let streamer = s.stt_streamers.read().get(&engine).cloned();
+    let Some(streamer) = streamer else {
+        return (
+            cors(),
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "unknown_engine", "engine": engine}))),
+        )
+            .into_response();
+    };
+
+    let ready = {
+        let st = streamer.clone();
         tokio::task::spawn_blocking(move || st.is_language_ready(language))
             .await
             .unwrap_or(false)
-    } else {
-        false
     };
     if !ready {
         return (
             cors(),
-            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready", "language": lang_str}))),
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "model_not_ready", "language": lang_str, "engine": engine}))),
         )
             .into_response();
     }
@@ -196,6 +212,7 @@ async fn create_session(
     let id = uuid::Uuid::new_v4().to_string();
     let session = Arc::new(SttSession {
         id: id.clone(),
+        engine: engine.clone(),
         transcripts: parking_lot::Mutex::new(Vec::new()),
         notify: tokio::sync::Notify::new(),
         last_active: parking_lot::Mutex::new(Instant::now()),
@@ -204,16 +221,15 @@ async fn create_session(
     });
     s.stt_sessions.write().insert(id.clone(), session);
 
-    if let Some(streamer) = streamer {
-        let sid = id.clone();
-        let _ = tokio::task::spawn_blocking(move || streamer.start_session(sid, language)).await;
-    }
+    let sid = id.clone();
+    let _ = tokio::task::spawn_blocking(move || streamer.start_session(sid, language)).await;
 
     (
         cors(),
         Json(CreateSessionResponse {
             session_id: id,
             language: lang_str.to_owned(),
+            engine,
             sample_rate: 16000,
             encoding: "pcm_s16le_mono",
         }),
@@ -236,7 +252,7 @@ async fn post_audio(
 
     *session.last_active.lock() = Instant::now();
 
-    if let Some(streamer) = s.stt_streamer.read().clone() {
+    if let Some(streamer) = s.stt_streamers.read().get(&session.engine).cloned() {
         let pcm = body.to_vec();
         let sid = id.clone();
         tokio::task::spawn_blocking(move || streamer.feed_audio(sid, pcm));

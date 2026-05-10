@@ -15,6 +15,7 @@ pub struct TranscriptEntry {
 
 pub struct SttSession {
     pub id: String,
+    pub engine: String,
     pub transcripts: Mutex<Vec<TranscriptEntry>>,
     pub notify: tokio::sync::Notify,
     pub last_active: Mutex<Instant>,
@@ -28,7 +29,7 @@ pub struct SharedState {
     pub location_streamer: RwLock<Option<Arc<dyn LocationStreamer>>>,
     pub subscriber_count: AtomicUsize,
 
-    pub stt_streamer: RwLock<Option<Arc<dyn SttStreamer>>>,
+    pub stt_streamers: RwLock<HashMap<String, Arc<dyn SttStreamer>>>,
     pub stt_sessions: RwLock<HashMap<String, Arc<SttSession>>>,
 }
 
@@ -40,7 +41,7 @@ impl SharedState {
             location_tx,
             location_streamer: RwLock::new(None),
             subscriber_count: AtomicUsize::new(0),
-            stt_streamer: RwLock::new(None),
+            stt_streamers: RwLock::new(HashMap::new()),
             stt_sessions: RwLock::new(HashMap::new()),
         }
     }

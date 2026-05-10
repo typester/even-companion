@@ -16,6 +16,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters += setOf("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -62,6 +65,10 @@ dependencies {
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
     implementation(libs.play.services.location)
     implementation("com.alphacephei:vosk-android:0.3.47")
+    // sherpa-onnx AAR: download from https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.1/sherpa-onnx-1.13.1.aar
+    // and place in app/libs/sherpa-onnx-1.13.1.aar
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+    implementation("org.apache.commons:commons-compress:1.26.1")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -94,7 +101,7 @@ val rustTargetDir = rootDir.resolve("rust/target")
 val hostLib = rustTargetDir.resolve("debug/libevencore.dylib")
 val bindingsOutDir = layout.buildDirectory.dir("generated/uniffi")
 
-val ndkAbiTargets = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val ndkAbiTargets = listOf("arm64-v8a")
 
 // ── UniFFI binding generation ─────────────────────────────────────────────────
 

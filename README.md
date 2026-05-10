@@ -13,10 +13,12 @@ G2 WebApp  ──fetch()──▶  Even Companion (Android)
                               │
                     ┌─────────┴──────────┐
                     │                    │
-           FusedLocationProvider      VOSK STT
-                    │                    │
-              GPS hardware          mic audio via
-                                   G2 bridge API
+           FusedLocationProvider      STT engines
+                    │               ┌───┴────────────────┐
+              GPS hardware          │                    │
+                                 VOSK               Sherpa-ONNX
+                             (JA + EN)           streaming Zipformer
+                                                     (EN only)
 ```
 
 ## API
@@ -52,7 +54,12 @@ WebSocket stream of location updates (~1 Hz). Each message is a JSON object in t
 
 ### Speech-to-Text
 
-Fully on-device STT via [VOSK](https://alphacephei.com/vosk/). Audio is supplied by the G2 glasses mic through the Even Hub bridge API (`bridge.audioControl(true)` / `onEvenHubEvent` → `audioEvent.audioPcm`). Format: 16 kHz, 16-bit little-endian mono (10 ms / 40 bytes per frame from the bridge).
+Fully on-device STT with two engine options. Audio is supplied by the G2 glasses mic through the Even Hub bridge API (`bridge.audioControl(true)` / `onEvenHubEvent` → `audioEvent.audioPcm`). Format: 16 kHz, 16-bit little-endian mono (10 ms / 40 bytes per frame from the bridge).
+
+| Engine | Languages | Model type | Notes |
+|--------|-----------|------------|-------|
+| `vosk` (default) | JA, EN | [VOSK](https://alphacephei.com/vosk/) small | ~49 MB JA / ~41 MB EN |
+| `sherpa` | EN only | [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) streaming Zipformer | higher accuracy; requires AAR setup (see [Setup](#setup)) |
 
 Before using STT, download at least one language model from the companion app's main screen.
 
@@ -62,24 +69,31 @@ Create a new STT session.
 
 Request body:
 ```json
-{ "language": "ja" }
+{ "language": "ja", "engine": "vosk" }
 ```
 
-`language` is `"ja"` (Japanese) or `"en"` (English).
+`language` is `"ja"` (Japanese) or `"en"` (English).  
+`engine` is `"vosk"` (default) or `"sherpa"`. Omitting `engine` defaults to `"vosk"`.
 
 Response `200`:
 ```json
 {
   "sessionId": "550e8400-e29b-41d4-a716-446655440000",
-  "language": "ja",
+  "language": "en",
+  "engine": "sherpa",
   "sampleRate": 16000,
   "encoding": "pcm_s16le_mono"
 }
 ```
 
-Response `503` if the model for the requested language has not been downloaded:
+Response `400` for an unknown engine:
 ```json
-{ "error": "model_not_ready", "language": "ja" }
+{ "error": "unknown_engine", "engine": "foo" }
+```
+
+Response `503` if the model for the requested language/engine has not been downloaded:
+```json
+{ "error": "model_not_ready", "language": "en", "engine": "sherpa" }
 ```
 
 #### `POST /stt/sessions/{id}/audio`
@@ -121,9 +135,20 @@ Sessions auto-expire after 60 seconds of inactivity (no audio POST and no active
 - Rust with Android targets:
 
 ```sh
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android
 cargo install cargo-ndk
 ```
+
+#### Sherpa-ONNX AAR (required for the `sherpa` engine)
+
+The sherpa-onnx prebuilt AAR is not included in this repository. Download it once and place it in `app/libs/`:
+
+```sh
+curl -L -o app/libs/sherpa-onnx-1.13.1.aar \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.1/sherpa-onnx-1.13.1.aar
+```
+
+If you skip this step the app still builds and the `vosk` engine works; the `sherpa` engine will fail at runtime with an `unknown_engine` error.
 
 ### Build & install
 
@@ -131,14 +156,14 @@ cargo install cargo-ndk
 JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
   ./gradlew :app:assembleDebug
 
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+~/Library/Android/sdk/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ### Running
 
 1. Open the app on your Android phone
 2. Grant location permission when prompted
-3. Download STT models — tap **Download** next to each language you need (~49 MB Japanese, ~41 MB English)
+3. Download STT models — tap **Download** in the VOSK or Sherpa-ONNX section for each language you need
 4. Tap **Start** — the foreground notification confirms the server is running
 5. Query `http://127.0.0.1:44423/location` or the `/stt/*` endpoints from your G2 web app
 
@@ -152,15 +177,15 @@ The server binds to `127.0.0.1` only in release builds. Debug builds bind to `0.
 | Core | Rust, bridged via [UniFFI](https://github.com/mozilla/uniffi-rs) |
 | HTTP server | tokio + axum |
 | GPS | FusedLocationProviderClient (Google Play Services) |
-| STT | [VOSK](https://alphacephei.com/vosk/) (on-device, streaming) |
+| STT | [VOSK](https://alphacephei.com/vosk/) + [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) (on-device, streaming) |
 
 The Rust core owns the HTTP server lifecycle. Kotlin implements UniFFI foreign traits for GPS and STT:
 
 - `LocationProvider` — called on-demand by `GET /location`
 - `LocationStreamer` — started/stopped by `WS /location/ws` as clients connect and disconnect
-- `SttStreamer` — wraps VOSK; one `Recognizer` per session, models shared across sessions of the same language
+- `SttStreamer` — interface implemented by both `VoskSttStreamer` and `SherpaOnnxSttStreamer`; the engine is chosen at session creation time and stored on the session
 
-VOSK models are downloaded on demand by `VoskModelManager` (no asset bundling — keeps the APK small). Models are stored in `filesDir/vosk/` and persist across app restarts.
+Models are downloaded on demand (no asset bundling). VOSK models go to `filesDir/vosk/`, Sherpa-ONNX models to `filesDir/sherpa/`.
 
 The server runs inside a foreground service (`type=location`) so it stays alive when the app is backgrounded or the screen is locked.
 
@@ -173,7 +198,7 @@ even-companion/
 │       ├── core/           EvenCore singleton
 │       ├── location/       PollingLocationProvider, FusedLocationStreamer
 │       ├── service/        CoreService (foreground service)
-│       ├── stt/            VoskSttStreamer, VoskModelManager
+│       ├── stt/            VoskSttStreamer, VoskModelManager, SherpaOnnxSttStreamer, SherpaModelManager
 │       └── ui/             Jetpack Compose screens
 └── rust/
     ├── core/               cdylib → libevencore.so  (UniFFI + HTTP server)

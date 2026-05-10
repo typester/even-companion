@@ -7,3 +7,5 @@ app/build/
 *.DS_Store
 rust/target/
 app/src/main/jniLibs/
+# sherpa-onnx prebuilt AAR — download separately (see README)
+app/libs/*.aar

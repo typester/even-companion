@@ -17,13 +17,15 @@ import dev.typester.evencompanion.core.EvenCore
 import dev.typester.evencompanion.core.uniffi.CoreException
 import dev.typester.evencompanion.location.FusedLocationStreamer
 import dev.typester.evencompanion.location.PollingLocationProvider
+import dev.typester.evencompanion.stt.SherpaOnnxSttStreamer
 import dev.typester.evencompanion.stt.VoskSttStreamer
 
 class CoreService : Service() {
 
     private val fusedClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private var pollingProvider: PollingLocationProvider? = null
-    private var sttStreamer: VoskSttStreamer? = null
+    private var voskStreamer: VoskSttStreamer? = null
+    private var sherpaStreamer: SherpaOnnxSttStreamer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -43,10 +45,13 @@ class CoreService : Service() {
             FusedLocationStreamer(fusedClient) { loc -> EvenCore.instance.broadcastLocation(loc) }
         )
 
-        val streamer = VoskSttStreamer(applicationContext)
-        sttStreamer = streamer
-        EvenCore.instance.setSttStreamer(streamer)
-        Thread { streamer.preload() }.start()
+        val vosk = VoskSttStreamer(applicationContext)
+        val sherpa = SherpaOnnxSttStreamer(applicationContext)
+        voskStreamer = vosk
+        sherpaStreamer = sherpa
+        EvenCore.instance.registerSttStreamer("vosk", vosk)
+        EvenCore.instance.registerSttStreamer("sherpa", sherpa)
+        Thread { vosk.preload(); sherpa.preload() }.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -55,7 +60,8 @@ class CoreService : Service() {
 
     override fun onDestroy() {
         pollingProvider?.cleanup()
-        sttStreamer?.cleanup()
+        voskStreamer?.cleanup()
+        sherpaStreamer?.cleanup()
         try { EvenCore.instance.stopServer() } catch (_: CoreException) {}
         super.onDestroy()
     }

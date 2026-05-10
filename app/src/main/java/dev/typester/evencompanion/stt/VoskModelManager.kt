@@ -13,13 +13,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.ZipInputStream
 
-sealed class ModelStatus {
-    object NotDownloaded : ModelStatus()
-    data class Downloading(val percent: Int) : ModelStatus()
-    object Ready : ModelStatus()
-    data class Failed(val reason: String) : ModelStatus()
-}
-
 class VoskModelManager private constructor(private val appContext: Context) {
 
     private val statuses = EnumMap<Language, MutableState<ModelStatus>>(Language::class.java)

@@ -33,6 +33,7 @@ import dev.typester.evencompanion.core.EvenCore
 import dev.typester.evencompanion.core.uniffi.Language
 import dev.typester.evencompanion.service.CoreService
 import dev.typester.evencompanion.stt.ModelStatus
+import dev.typester.evencompanion.stt.SherpaModelManager
 import dev.typester.evencompanion.stt.VoskModelManager
 
 @Composable
@@ -60,9 +61,12 @@ fun MainScreen() {
         }
     }
 
-    val mgr = remember { VoskModelManager.get(ctx) }
-    val jaStatus by mgr.status(Language.JA)
-    val enStatus by mgr.status(Language.EN)
+    val voskMgr = remember { VoskModelManager.get(ctx) }
+    val voskJaStatus by voskMgr.status(Language.JA)
+    val voskEnStatus by voskMgr.status(Language.EN)
+
+    val sherpaMgr = remember { SherpaModelManager.get(ctx) }
+    val sherpaEnStatus by sherpaMgr.status(Language.EN)
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
         Column(
@@ -73,21 +77,31 @@ fun MainScreen() {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("STT Models", style = MaterialTheme.typography.titleMedium)
+            Text("VOSK", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             ModelStatusRow(
                 label = "Japanese",
-                status = jaStatus,
-                onDownload = { mgr.download(Language.JA) },
-                onCancel = { mgr.cancel(Language.JA) },
-                onDelete = { mgr.delete(Language.JA) },
+                status = voskJaStatus,
+                onDownload = { voskMgr.download(Language.JA) },
+                onCancel = { voskMgr.cancel(Language.JA) },
+                onDelete = { voskMgr.delete(Language.JA) },
             )
             ModelStatusRow(
                 label = "English",
-                status = enStatus,
-                onDownload = { mgr.download(Language.EN) },
-                onCancel = { mgr.cancel(Language.EN) },
-                onDelete = { mgr.delete(Language.EN) },
+                status = voskEnStatus,
+                onDownload = { voskMgr.download(Language.EN) },
+                onCancel = { voskMgr.cancel(Language.EN) },
+                onDelete = { voskMgr.delete(Language.EN) },
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Sherpa-ONNX (streaming)", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            ModelStatusRow(
+                label = "English",
+                status = sherpaEnStatus,
+                onDownload = { sherpaMgr.download(Language.EN) },
+                onCancel = { sherpaMgr.cancel(Language.EN) },
+                onDelete = { sherpaMgr.delete(Language.EN) },
             )
             Spacer(modifier = Modifier.height(24.dp))
             Text(

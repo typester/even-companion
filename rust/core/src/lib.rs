@@ -137,8 +137,8 @@ impl Core {
         self.state.location_tx.send(loc).ok();
     }
 
-    pub fn set_stt_streamer(&self, streamer: Arc<dyn SttStreamer>) {
-        *self.state.stt_streamer.write() = Some(streamer);
+    pub fn register_stt_streamer(&self, engine: String, streamer: Arc<dyn SttStreamer>) {
+        self.state.stt_streamers.write().insert(engine, streamer);
     }
 
     pub fn push_transcript(&self, session_id: String, text: String, is_final: bool) {
